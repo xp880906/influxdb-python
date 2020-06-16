@@ -31,9 +31,9 @@ with open('README.rst', 'r') as f:
 
 
 setup(
-    name='influxdb',
+    name='influxdb-aio',
     version=version,
-    description="InfluxDB client",
+    description="InfluxDB client, asyncio version",
     long_description=readme,
     url='https://github.com/influxdb/influxdb-python',
     license='MIT License',
