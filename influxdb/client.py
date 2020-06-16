@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """Python client for InfluxDB."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
 
+import asyncio
 import datetime
 import gzip
-import itertools
 import io
+import itertools
 import json
 import random
 import socket
@@ -17,15 +16,14 @@ import struct
 import time
 from itertools import chain, islice
 
+import httpx
 import msgpack
-import requests
-import requests.exceptions
 from six.moves.urllib.parse import urlparse
 
 from influxdb.line_protocol import make_lines, quote_ident, quote_literal
 from influxdb.resultset import ResultSet
-from .exceptions import InfluxDBClientError
-from .exceptions import InfluxDBServerError
+
+from .exceptions import InfluxDBClientError, InfluxDBServerError
 
 
 class InfluxDBClient(object):
@@ -124,15 +122,6 @@ class InfluxDBClient(object):
         self.__use_udp = use_udp
         self.__udp_port = int(udp_port)
 
-        if not session:
-            session = requests.Session()
-
-        self._session = session
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=int(pool_size),
-            pool_maxsize=int(pool_size)
-        )
-
         if use_udp:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -148,12 +137,28 @@ class InfluxDBClient(object):
         if ssl is True:
             self._scheme = "https"
 
-        self._session.mount(self._scheme + '://', adapter)
-
         if proxies is None:
             self._proxies = {}
         else:
             self._proxies = proxies
+
+        if not session:
+            pool_limit = httpx.PoolLimits(max_connections=int(pool_size))
+            # session = requests.Session()
+            session = httpx.AsyncClient(
+                pool_limits=pool_limit,
+                proxies=self._proxies,
+                verify=self._verify_ssl,
+                trust_env=False
+            )
+
+        self._session = session
+        # adapter = requests.adapters.HTTPAdapter(
+        #     pool_connections=int(pool_size),
+        #     pool_maxsize=int(pool_size)
+        # )
+
+        # self._session.mount(self._scheme + '://', adapter)
 
         if cert:
             if not ssl:
@@ -269,7 +274,7 @@ class InfluxDBClient(object):
         self._username = username
         self._password = password
 
-    def request(self, url, method='GET', params=None, data=None, stream=False,
+    async def request(self, url, method='GET', params=None, data=None, stream=False,
                 expected_response_code=200, headers=None):
         """Make a HTTP request to the InfluxDB API.
 
@@ -328,22 +333,22 @@ class InfluxDBClient(object):
         _try = 0
         while retry:
             try:
-                response = self._session.request(
+                response = await self._session.request(
                     method=method,
                     url=url,
                     auth=(self._username, self._password),
                     params=params,
                     data=data,
-                    stream=stream,
+                    # stream=stream,
                     headers=headers,
-                    proxies=self._proxies,
-                    verify=self._verify_ssl,
                     timeout=self._timeout
                 )
                 break
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.HTTPError,
-                    requests.exceptions.Timeout):
+            except (httpx.ConnectError,
+                    httpx.HTTPError,
+                    httpx.ConnectTimeout,
+                    httpx.ReadTimeout,
+                    httpx.WriteTimeout):
                 _try += 1
                 if self._retries != 0:
                     retry = _try < self._retries
@@ -376,7 +381,7 @@ class InfluxDBClient(object):
             err_msg = reformat_error(response)
             raise InfluxDBClientError(err_msg, response.status_code)
 
-    def write(self, data, params=None, expected_response_code=204,
+    async def write(self, data, params=None, expected_response_code=204,
               protocol='json'):
         """Write data to InfluxDB.
 
@@ -409,7 +414,7 @@ class InfluxDBClient(object):
                 data = [data]
             data = ('\n'.join(data) + '\n').encode('utf-8')
 
-        self.request(
+        await self.request(
             url="write",
             method='POST',
             params=params,
@@ -433,7 +438,7 @@ class InfluxDBClient(object):
                             _key, []).extend(result[_key])
             yield ResultSet(result_set, raise_errors=raise_errors)
 
-    def query(self,
+    async def query(self,
               query,
               params=None,
               bind_params=None,
@@ -517,7 +522,7 @@ class InfluxDBClient(object):
         if query.lower().startswith("select ") and " into " in query.lower():
             method = "POST"
 
-        response = self.request(
+        response = await self.request(
             url="query",
             method=method,
             params=params,
@@ -544,7 +549,7 @@ class InfluxDBClient(object):
 
         return results
 
-    def write_points(self,
+    async def write_points(self,
                      points,
                      time_precision=None,
                      database=None,
@@ -591,7 +596,7 @@ class InfluxDBClient(object):
         """
         if batch_size and batch_size > 0:
             for batch in self._batches(points, batch_size):
-                self._write_points(points=batch,
+                await self._write_points(points=batch,
                                    time_precision=time_precision,
                                    database=database,
                                    retention_policy=retention_policy,
@@ -599,19 +604,19 @@ class InfluxDBClient(object):
                                    consistency=consistency)
             return True
 
-        return self._write_points(points=points,
+        return await self._write_points(points=points,
                                   time_precision=time_precision,
                                   database=database,
                                   retention_policy=retention_policy,
                                   tags=tags, protocol=protocol,
                                   consistency=consistency)
 
-    def ping(self):
+    async def ping(self):
         """Check connectivity to InfluxDB.
 
         :returns: The version of the InfluxDB the client is connected to
         """
-        response = self.request(
+        response = await self.request(
             url="ping",
             method='GET',
             expected_response_code=204
@@ -633,7 +638,7 @@ class InfluxDBClient(object):
             rest = islice(iterator, size - 1)
             yield chain(head, rest)
 
-    def _write_points(self,
+    async def _write_points(self,
                       points,
                       time_precision,
                       database,
@@ -677,7 +682,7 @@ class InfluxDBClient(object):
                 data, protocol=protocol, time_precision=time_precision
             )
         else:
-            self.write(
+            await self.write(
                 data=data,
                 params=params,
                 expected_response_code=204,
@@ -702,7 +707,7 @@ class InfluxDBClient(object):
         """
         return list(self.query("SHOW DATABASES").get_points())
 
-    def get_list_series(self, database=None, measurement=None, tags=None):
+    async def get_list_series(self, database=None, measurement=None, tags=None):
         """
         Query SHOW SERIES returns the distinct series in your database.
 
@@ -730,31 +735,31 @@ class InfluxDBClient(object):
             itertools.chain.from_iterable(
                 [
                     x.values()
-                    for x in (self.query(query_str, database=database)
+                    for x in (await self.query(query_str, database=database)
                               .get_points())
                 ]
             )
         )
 
-    def create_database(self, dbname):
+    async def create_database(self, dbname):
         """Create a new database in InfluxDB.
 
         :param dbname: the name of the database to create
         :type dbname: str
         """
-        self.query("CREATE DATABASE {0}".format(quote_ident(dbname)),
+        await self.query("CREATE DATABASE {0}".format(quote_ident(dbname)),
                    method="POST")
 
-    def drop_database(self, dbname):
+    async def drop_database(self, dbname):
         """Drop a database from InfluxDB.
 
         :param dbname: the name of the database to drop
         :type dbname: str
         """
-        self.query("DROP DATABASE {0}".format(quote_ident(dbname)),
+        await self.query("DROP DATABASE {0}".format(quote_ident(dbname)),
                    method="POST")
 
-    def get_list_measurements(self):
+    async def get_list_measurements(self):
         """Get the list of measurements in InfluxDB.
 
         :returns: all measurements in InfluxDB
@@ -770,18 +775,18 @@ class InfluxDBClient(object):
              {u'name': u'measurements2'},
              {u'name': u'measurements3'}]
         """
-        return list(self.query("SHOW MEASUREMENTS").get_points())
+        return list(await self.query("SHOW MEASUREMENTS").get_points())
 
-    def drop_measurement(self, measurement):
+    async def drop_measurement(self, measurement):
         """Drop a measurement from InfluxDB.
 
         :param measurement: the name of the measurement to drop
         :type measurement: str
         """
-        self.query("DROP MEASUREMENT {0}".format(quote_ident(measurement)),
+        await self.query("DROP MEASUREMENT {0}".format(quote_ident(measurement)),
                    method="POST")
 
-    def create_retention_policy(self, name, duration, replication,
+    async def create_retention_policy(self, name, duration, replication,
                                 database=None,
                                 default=False, shard_duration="0s"):
         """Create a retention policy for a database.
@@ -821,9 +826,9 @@ class InfluxDBClient(object):
         if default is True:
             query_string += " DEFAULT"
 
-        self.query(query_string, method="POST")
+        await self.query(query_string, method="POST")
 
-    def alter_retention_policy(self, name, database=None,
+    async def alter_retention_policy(self, name, database=None,
                                duration=None, replication=None,
                                default=None, shard_duration=None):
         """Modify an existing retention policy for a database.
@@ -870,9 +875,9 @@ class InfluxDBClient(object):
         if default is True:
             query_string += " DEFAULT"
 
-        self.query(query_string, method="POST")
+        await self.query(query_string, method="POST")
 
-    def drop_retention_policy(self, name, database=None):
+    async def drop_retention_policy(self, name, database=None):
         """Drop an existing retention policy for a database.
 
         :param name: the name of the retention policy to drop
@@ -884,9 +889,9 @@ class InfluxDBClient(object):
         query_string = (
             "DROP RETENTION POLICY {0} ON {1}"
         ).format(quote_ident(name), quote_ident(database or self._database))
-        self.query(query_string, method="POST")
+        await self.query(query_string, method="POST")
 
-    def get_list_retention_policies(self, database=None):
+    async def get_list_retention_policies(self, database=None):
         """Get the list of retention policies for a database.
 
         :param database: the name of the database, defaults to the client's
@@ -911,13 +916,13 @@ class InfluxDBClient(object):
                 "get_list_retention_policies() requires a database as a "
                 "parameter or the client to be using a database")
 
-        rsp = self.query(
+        rsp = await self.query(
             "SHOW RETENTION POLICIES ON {0}".format(
                 quote_ident(database or self._database))
         )
         return list(rsp.get_points())
 
-    def get_list_users(self):
+    async def get_list_users(self):
         """Get the list of all users in InfluxDB.
 
         :returns: all users in InfluxDB
@@ -933,9 +938,9 @@ class InfluxDBClient(object):
              {u'admin': False, u'user': u'user2'},
              {u'admin': False, u'user': u'user3'}]
         """
-        return list(self.query("SHOW USERS").get_points())
+        return list(await self.query("SHOW USERS").get_points())
 
-    def create_user(self, username, password, admin=False):
+    async def create_user(self, username, password, admin=False):
         """Create a new user in InfluxDB.
 
         :param username: the new username to create
@@ -950,18 +955,18 @@ class InfluxDBClient(object):
             quote_ident(username), quote_literal(password))
         if admin:
             text += ' WITH ALL PRIVILEGES'
-        self.query(text, method="POST")
+        await self.query(text, method="POST")
 
-    def drop_user(self, username):
+    async def drop_user(self, username):
         """Drop a user from InfluxDB.
 
         :param username: the username to drop
         :type username: str
         """
         text = "DROP USER {0}".format(quote_ident(username))
-        self.query(text, method="POST")
+        await self.query(text, method="POST")
 
-    def set_user_password(self, username, password):
+    async def set_user_password(self, username, password):
         """Change the password of an existing user.
 
         :param username: the username who's password is being changed
@@ -971,9 +976,9 @@ class InfluxDBClient(object):
         """
         text = "SET PASSWORD FOR {0} = {1}".format(
             quote_ident(username), quote_literal(password))
-        self.query(text)
+        await self.query(text)
 
-    def delete_series(self, database=None, measurement=None, tags=None):
+    async def delete_series(self, database=None, measurement=None, tags=None):
         """Delete series from a database.
 
         Series must be filtered by either measurement and tags.
@@ -997,9 +1002,9 @@ class InfluxDBClient(object):
             tag_eq_list = ["{0}={1}".format(quote_ident(k), quote_literal(v))
                            for k, v in tags.items()]
             query_str += ' WHERE ' + ' AND '.join(tag_eq_list)
-        self.query(query_str, database=database, method="POST")
+        await self.query(query_str, database=database, method="POST")
 
-    def grant_admin_privileges(self, username):
+    async def grant_admin_privileges(self, username):
         """Grant cluster administration privileges to a user.
 
         :param username: the username to grant privileges to
@@ -1009,9 +1014,9 @@ class InfluxDBClient(object):
             and manage users.
         """
         text = "GRANT ALL PRIVILEGES TO {0}".format(quote_ident(username))
-        self.query(text, method="POST")
+        await self.query(text, method="POST")
 
-    def revoke_admin_privileges(self, username):
+    async def revoke_admin_privileges(self, username):
         """Revoke cluster administration privileges from a user.
 
         :param username: the username to revoke privileges from
@@ -1021,9 +1026,9 @@ class InfluxDBClient(object):
             and manage users.
         """
         text = "REVOKE ALL PRIVILEGES FROM {0}".format(quote_ident(username))
-        self.query(text, method="POST")
+        await self.query(text, method="POST")
 
-    def grant_privilege(self, privilege, database, username):
+    async def grant_privilege(self, privilege, database, username):
         """Grant a privilege on a database to a user.
 
         :param privilege: the privilege to grant, one of 'read', 'write'
@@ -1037,9 +1042,9 @@ class InfluxDBClient(object):
         text = "GRANT {0} ON {1} TO {2}".format(privilege,
                                                 quote_ident(database),
                                                 quote_ident(username))
-        self.query(text, method="POST")
+        await self.query(text, method="POST")
 
-    def revoke_privilege(self, privilege, database, username):
+    async def revoke_privilege(self, privilege, database, username):
         """Revoke a privilege on a database from a user.
 
         :param privilege: the privilege to revoke, one of 'read', 'write'
@@ -1053,9 +1058,9 @@ class InfluxDBClient(object):
         text = "REVOKE {0} ON {1} FROM {2}".format(privilege,
                                                    quote_ident(database),
                                                    quote_ident(username))
-        self.query(text, method="POST")
+        await self.query(text, method="POST")
 
-    def get_list_privileges(self, username):
+    async def get_list_privileges(self, username):
         """Get the list of all privileges granted to given user.
 
         :param username: the username to get privileges of
@@ -1075,9 +1080,9 @@ class InfluxDBClient(object):
              {u'privilege': u'NO PRIVILEGES', u'database': u'db3'}]
         """
         text = "SHOW GRANTS FOR {0}".format(quote_ident(username))
-        return list(self.query(text).get_points())
+        return list(await self.query(text).get_points())
 
-    def get_list_continuous_queries(self):
+    async def get_list_continuous_queries(self):
         """Get the list of continuous queries in InfluxDB.
 
         :return: all CQs in InfluxDB
@@ -1107,9 +1112,9 @@ class InfluxDBClient(object):
             ]
         """
         query_string = "SHOW CONTINUOUS QUERIES"
-        return [{sk[0]: list(p)} for sk, p in self.query(query_string).items()]
+        return [{sk[0]: list(p)} for sk, p in await self.query(query_string).items()]
 
-    def create_continuous_query(self, name, select, database=None,
+    async def create_continuous_query(self, name, select, database=None,
                                 resample_opts=None):
         r"""Create a continuous query for a database.
 
@@ -1153,9 +1158,9 @@ class InfluxDBClient(object):
             "CREATE CONTINUOUS QUERY {0} ON {1}{2} BEGIN {3} END"
         ).format(quote_ident(name), quote_ident(database or self._database),
                  ' RESAMPLE ' + resample_opts if resample_opts else '', select)
-        self.query(query_string)
+        await self.query(query_string)
 
-    def drop_continuous_query(self, name, database=None):
+    async def drop_continuous_query(self, name, database=None):
         """Drop an existing continuous query for a database.
 
         :param name: the name of continuous query to drop
@@ -1167,7 +1172,7 @@ class InfluxDBClient(object):
         query_string = (
             "DROP CONTINUOUS QUERY {0} ON {1}"
         ).format(quote_ident(name), quote_ident(database or self._database))
-        self.query(query_string)
+        await self.query(query_string)
 
     def send_packet(self, packet, protocol='json', time_precision=None):
         """Send an UDP packet.
@@ -1186,10 +1191,10 @@ class InfluxDBClient(object):
             data = ('\n'.join(packet) + '\n').encode('utf-8')
         self.udp_socket.sendto(data, (self._host, self._udp_port))
 
-    def close(self):
+    async def close(self):
         """Close http session."""
-        if isinstance(self._session, requests.Session):
-            self._session.close()
+        if isinstance(self._session, httpx.AsyncClient):
+            await self._session.aclose()
 
 
 def _parse_dsn(dsn):

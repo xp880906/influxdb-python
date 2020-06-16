@@ -14,32 +14,33 @@ See client_test_with_server.py for tests against a running server instance.
 
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
 
+import gzip
+import io
+import json
 import random
 import socket
 import unittest
 import warnings
 
-import io
-import gzip
-import json
+import httpx
 import mock
-import requests
-import requests.exceptions
-import requests_mock
-
+import respx
 from nose.tools import raises
 
 from influxdb import InfluxDBClient
 from influxdb.resultset import ResultSet
 
+# import requests
+# import requests.exceptions
+# import requests_mock
+
 
 def _build_response_object(status_code=200, content=""):
-    resp = requests.Response()
+    # resp = requests.Response()
+    resp = httpx.Response()
     resp.status_code = status_code
     resp._content = content.encode("utf8")
     return resp
@@ -48,7 +49,7 @@ def _build_response_object(status_code=200, content=""):
 def _mocked_session(cli, method="GET", status_code=200, content=""):
     method = method.upper()
 
-    def request(*args, **kwargs):
+    async def request(*args, **kwargs):
         """Request content from the mocked session."""
         c = content
 
@@ -172,16 +173,16 @@ class TestInfluxDBClient(unittest.TestCase):
         self.assertEqual('another_username', cli._username)
         self.assertEqual('another_password', cli._password)
 
-    def test_write(self):
+    async def test_write(self):
         """Test write in TestInfluxDBClient object."""
-        with requests_mock.Mocker() as m:
+        async with requests_mock.Mocker() as m:
             m.register_uri(
                 requests_mock.POST,
                 "http://localhost:8086/write",
                 status_code=204
             )
             cli = InfluxDBClient(database='db')
-            cli.write(
+            await cli.write(
                 {"database": "mydb",
                  "retentionPolicy": "mypolicy",
                  "points": [{"measurement": "cpu_load_short",
