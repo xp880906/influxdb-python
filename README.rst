@@ -15,6 +15,10 @@ InfluxDB-Python
    :target: https://pypi.python.org/pypi/influxdb
    :alt: PyPI Status
 
+Statement
+-----------
+    This is forked from (https://github.com/influxdata/influxdb-python), which support asyncio.
+
 InfluxDB-Python is a client for interacting with InfluxDB_.
 
 Development of this library is maintained by:
