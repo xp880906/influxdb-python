@@ -17,7 +17,7 @@ import os
 import re
 
 
-with open(os.path.join(os.path.dirname(__file__), 'influxdb', '__init__.py')) as f:
+with open(os.path.join(os.path.dirname(__file__), 'influxdb_aio', '__init__.py')) as f:
     version = re.search("__version__ = '([^']+)'", f.read()).group(1)
 
 with open('requirements.txt', 'r') as f:

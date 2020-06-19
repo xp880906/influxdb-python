@@ -20,8 +20,8 @@ import httpx
 import msgpack
 from six.moves.urllib.parse import urlparse
 
-from influxdb.line_protocol import make_lines, quote_ident, quote_literal
-from influxdb.resultset import ResultSet
+from influxdb_aio.line_protocol import make_lines, quote_ident, quote_literal
+from influxdb_aio.resultset import ResultSet
 
 from .exceptions import InfluxDBClientError, InfluxDBServerError
 
