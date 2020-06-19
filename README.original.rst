@@ -12,12 +12,8 @@ InfluxDB-Python
   :alt: Coverage
 
 .. image:: https://img.shields.io/pypi/v/influxdb.svg
-   :target: https://pypi.python.org/pypi/influxdb
+   :target: https://pypi.org/project/influxdb-aio/
    :alt: PyPI Status
-
-Statement
------------
-    This is forked from (https://github.com/influxdata/influxdb-python), which support asyncio.
 
 InfluxDB-Python is a client for interacting with InfluxDB_.
 
